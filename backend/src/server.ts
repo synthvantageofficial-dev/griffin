@@ -2,6 +2,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import helmet from '@fastify/helmet';
 import { env } from './config/env.js';
+import { pingDb } from './db/pool.js';
 
 export async function buildServer(): Promise<FastifyInstance> {
   const app = Fastify({
@@ -17,6 +18,18 @@ export async function buildServer(): Promise<FastifyInstance> {
 
   // Liveness probe. Real business routes are added per module as we build.
   app.get('/health', async () => ({ status: 'ok', service: 'investing-app-backend', ts: new Date().toISOString() }));
+
+  // DB connectivity probe.
+  app.get('/health/db', async (_req, reply) => {
+    if (!env.DATABASE_URL) return { status: 'not_configured' };
+    try {
+      const ok = await pingDb();
+      return { status: ok ? 'ok' : 'error' };
+    } catch (err) {
+      reply.code(503);
+      return { status: 'error', message: (err as Error).message };
+    }
+  });
 
   return app;
 }

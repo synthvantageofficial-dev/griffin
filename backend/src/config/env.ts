@@ -10,6 +10,9 @@ const EnvSchema = z.object({
   HOST: z.string().default('127.0.0.1'),
   PORT: z.coerce.number().int().positive().default(4000),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+  // Supabase Postgres connection string. Optional for now so the server can boot
+  // before the DB is wired; DB routes report "not_configured" until it is set.
+  DATABASE_URL: z.string().min(1).optional(),
 });
 
 const parsed = EnvSchema.safeParse(process.env);
