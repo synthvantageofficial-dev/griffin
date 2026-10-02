@@ -176,3 +176,67 @@ describe('processPurchase (full pure flow)', () => {
     expect(r.finalBalancePaise).toBe(300);
   });
 });
+
+describe('per-brand separation (each stock keeps its OWN balance)', () => {
+  // Models the real caller: balances kept in a map keyed by the target symbol,
+  // exactly like the DB's unique(user_id, target_symbol). Each brand = its own bucket.
+  const prices = new Map<string, number>([
+    ['ZOMATO', 14000], // ₹140 per share
+    ['TITAN', 350000], // ₹3,500 per share
+    ['NIFTYBEES', 28000], // ₹280 per ETF unit
+  ]);
+  const maps = {
+    zomato: { listing: 'india_listed', symbol: 'ZOMATO' } as MerchantMapping,
+    titan: { listing: 'india_listed', symbol: 'TITAN' } as MerchantMapping,
+    local: { listing: 'unlisted' } as MerchantMapping,
+  };
+
+  function run(seq: Array<{ brand: keyof typeof maps; amount: number }>) {
+    const balances = new Map<string, number>();
+    const buys: Array<{ symbol: string; qty: number }> = [];
+    seq.forEach((step, i) => {
+      const mapping = maps[step.brand];
+      // caller resolves the target, then reads THAT target's own balance + price
+      const target = resolveTarget(mapping, 'NIFTYBEES');
+      const current = toPaise(balances.get(target.symbol) ?? 0);
+      const price = toPaise(prices.get(target.symbol) ?? 0);
+      const r = processPurchase({
+        purchasePaise: toPaise(step.amount),
+        rule: fixed20,
+        mapping,
+        fallbackEtfSymbol: 'NIFTYBEES',
+        currentBalancePaise: current,
+        sharePricePaise: price,
+        idempotencyKey: `t${i}`,
+      });
+      balances.set(target.symbol, r.finalBalancePaise);
+      if (r.execution.shouldBuy) buys.push({ symbol: target.symbol, qty: r.execution.qty });
+    });
+    return { balances, buys };
+  }
+
+  it('never mixes brands — each accumulates on its own', () => {
+    const { balances } = run([
+      { brand: 'zomato', amount: 50000 }, // +₹20 -> ZOMATO
+      { brand: 'titan', amount: 90000 }, // +₹20 -> TITAN (separate bucket)
+      { brand: 'zomato', amount: 30000 }, // +₹20 -> ZOMATO only
+      { brand: 'local', amount: 21700 }, // +₹20 -> NIFTYBEES fallback
+    ]);
+    expect(balances.get('ZOMATO')).toBe(4000); // only Zomato's two purchases
+    expect(balances.get('TITAN')).toBe(2000); // untouched by Zomato
+    expect(balances.get('NIFTYBEES')).toBe(2000); // the local-shop fallback, separate
+  });
+
+  it('a buy in one brand never touches another brand', () => {
+    const seq: Array<{ brand: keyof typeof maps; amount: number }> = Array.from({ length: 7 }, () => ({
+      brand: 'zomato',
+      amount: 50000, // 7 × ₹20 = ₹140 -> buys exactly 1 ZOMATO share
+    }));
+    seq.splice(3, 0, { brand: 'titan', amount: 90000 }); // one Titan purchase in the middle
+    const { balances, buys } = run(seq);
+    expect(buys).toContainEqual({ symbol: 'ZOMATO', qty: 1 });
+    expect(buys.find((b) => b.symbol === 'TITAN')).toBeUndefined(); // Titan never bought
+    expect(balances.get('TITAN')).toBe(2000); // the lone Titan ₹20, untouched by Zomato's buy
+    expect(balances.get('ZOMATO')).toBe(0); // ₹140 accumulated -> 1 share bought, ₹0 carried
+  });
+});
