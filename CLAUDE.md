@@ -1,6 +1,6 @@
 # CLAUDE.md — Project Master Plan
 
-> **Working title:** _TBD_ (an "invest where you shop" app for India)
+> **Name:** Owna (an "invest where you shop" app for India) — chosen 2026-10-02; verify domain/handle/trademark before heavy use. Brand look (from landing page): blue #2589D2, pink #DB406C, dark #121516, Metropolis font (Grifin-style, per founder's request).
 > **One-liner:** Jab bhi user kisi **publicly-listed company** par kharch karta hai, hum us kharch ka ek chhota hissa jama karte hain, aur jaise hi us company ke **1 poore share** jitna paisa jama ho jaata hai, uske liye **usi company ka 1 share automatically execute** kar dete hain. (India-adapted "Grifin" model.)
 > **Last updated:** 2026-09-30
 
@@ -205,7 +205,7 @@ The target is always **deterministic** from this tree + the user's pre-set fallb
 - Retention (micro-investing apps live/die on engagement).
 
 **Open decisions (to finalize):**
-- [ ] Product **name** + brand.
+- [x] Product **name**: **Owna** (chosen 2026-10-02). Landing page built at `landing/index.html` (Grifin-style), waitlist → Supabase `waitlist` table.
 - [ ] Which **broker** partner (depends on AP terms + API + willingness for this novel flow).
 - [ ] Round-up rule default (round-to-nearest vs fixed per-purchase).
 - [x] Fallback rule **finalized**: NO skip — always invest. Unlisted (national or international) → user-selected broad **India index ETF** (chosen once at onboarding, consented in T&Cs), bought via broker demat rails. (Still to pick: which exact ETF options to offer.)
