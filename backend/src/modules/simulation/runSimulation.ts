@@ -1,7 +1,9 @@
 /**
- * End-to-end simulation of the core loop (no DB, no broker) — ties together
- * merchant mapping + accumulation engine + price provider. Pure: returns data;
- * the demo script does the printing.
+ * Core-loop glue — ties merchant mapping + accumulation engine + price provider.
+ *
+ * `applyTransaction` is the single source of truth for "process one purchase
+ * against some accumulation state". Both the batch simulation and the live API
+ * use it, so the money logic lives in exactly one place.
  */
 import { toPaise, type Paise } from '../../lib/money.js';
 import { resolveMerchant } from '../mapping/resolveMerchant.js';
@@ -35,11 +37,71 @@ export interface SimEvent {
   readonly progressPct: number;
 }
 
+/** Mutable accumulation state (per user). Keyed by target symbol = per-brand buckets. */
+export interface LoopState {
+  readonly balances: Map<string, Paise>;
+  readonly holdings: Map<string, number>;
+  readonly names: Map<string, string>;
+}
+
+export function newLoopState(): LoopState {
+  return { balances: new Map(), holdings: new Map(), names: new Map() };
+}
+
+/** Process ONE purchase against `state`, mutating it, and return what happened. */
+export function applyTransaction(
+  state: LoopState,
+  txn: SampleTxn,
+  config: SimConfig,
+  prices: PriceProvider,
+): SimEvent {
+  const mapping = resolveMerchant(txn.merchant);
+  const target = resolveTarget(mapping, config.fallbackEtfSymbol);
+  const price = prices.getPricePaise(target.symbol) ?? toPaise(0);
+  const current = state.balances.get(target.symbol) ?? toPaise(0);
+
+  const r = processPurchase({
+    purchasePaise: txn.amountPaise,
+    rule: config.rule,
+    mapping,
+    fallbackEtfSymbol: config.fallbackEtfSymbol,
+    currentBalancePaise: current,
+    sharePricePaise: price,
+    idempotencyKey: txn.ref,
+  });
+
+  state.balances.set(target.symbol, r.finalBalancePaise);
+
+  // Display the ACTUAL target: fallback routes show the ETF, not the brand.
+  const entityName =
+    target.symbol === config.fallbackEtfSymbol
+      ? (config.fallbackName ?? 'Index ETF (fallback)')
+      : (mapping?.entityName ?? target.symbol);
+  state.names.set(target.symbol, entityName);
+
+  if (r.execution.shouldBuy) {
+    state.holdings.set(target.symbol, (state.holdings.get(target.symbol) ?? 0) + r.execution.qty);
+  }
+
+  return {
+    ref: txn.ref,
+    merchant: txn.merchant,
+    entityName,
+    symbol: target.symbol,
+    kind: target.kind,
+    roundupPaise: r.roundupPaise,
+    boughtQty: r.execution.shouldBuy ? r.execution.qty : 0,
+    boughtCostPaise: r.execution.shouldBuy ? r.execution.costPaise : toPaise(0),
+    balancePaise: r.finalBalancePaise,
+    progressPct: progressPercent(r.finalBalancePaise, price),
+  };
+}
+
 export interface SimResult {
   readonly events: SimEvent[];
-  readonly holdings: Map<string, number>; // symbol -> whole shares/units owned
-  readonly balances: Map<string, Paise>; // symbol -> still-accumulating balance
-  readonly names: Map<string, string>; // symbol -> human-readable entity name
+  readonly holdings: Map<string, number>;
+  readonly balances: Map<string, Paise>;
+  readonly names: Map<string, string>;
 }
 
 export function runSimulation(
@@ -47,53 +109,7 @@ export function runSimulation(
   config: SimConfig,
   prices: PriceProvider,
 ): SimResult {
-  const balances = new Map<string, Paise>();
-  const holdings = new Map<string, number>();
-  const names = new Map<string, string>();
-  const events: SimEvent[] = [];
-
-  for (const t of txns) {
-    const mapping = resolveMerchant(t.merchant);
-    const target = resolveTarget(mapping, config.fallbackEtfSymbol);
-    const price = prices.getPricePaise(target.symbol) ?? toPaise(0);
-    const current = balances.get(target.symbol) ?? toPaise(0);
-
-    const r = processPurchase({
-      purchasePaise: t.amountPaise,
-      rule: config.rule,
-      mapping,
-      fallbackEtfSymbol: config.fallbackEtfSymbol,
-      currentBalancePaise: current,
-      sharePricePaise: price,
-      idempotencyKey: t.ref,
-    });
-
-    balances.set(target.symbol, r.finalBalancePaise);
-
-    // Display the ACTUAL target: fallback routes show the ETF, not the brand.
-    const entityName =
-      target.symbol === config.fallbackEtfSymbol
-        ? (config.fallbackName ?? 'Index ETF (fallback)')
-        : (mapping?.entityName ?? target.symbol);
-    names.set(target.symbol, entityName);
-
-    if (r.execution.shouldBuy) {
-      holdings.set(target.symbol, (holdings.get(target.symbol) ?? 0) + r.execution.qty);
-    }
-
-    events.push({
-      ref: t.ref,
-      merchant: t.merchant,
-      entityName,
-      symbol: target.symbol,
-      kind: target.kind,
-      roundupPaise: r.roundupPaise,
-      boughtQty: r.execution.shouldBuy ? r.execution.qty : 0,
-      boughtCostPaise: r.execution.shouldBuy ? r.execution.costPaise : toPaise(0),
-      balancePaise: r.finalBalancePaise,
-      progressPct: progressPercent(r.finalBalancePaise, price),
-    });
-  }
-
-  return { events, holdings, balances, names };
+  const state = newLoopState();
+  const events = txns.map((t) => applyTransaction(state, t, config, prices));
+  return { events, holdings: state.holdings, balances: state.balances, names: state.names };
 }

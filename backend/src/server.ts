@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import helmet from '@fastify/helmet';
 import { env } from './config/env.js';
 import { pingDb } from './db/pool.js';
+import { registerApiRoutes } from './modules/api/routes.js';
 
 export async function buildServer(): Promise<FastifyInstance> {
   const app = Fastify({
@@ -30,6 +31,9 @@ export async function buildServer(): Promise<FastifyInstance> {
       return { status: 'error', message: (err as Error).message };
     }
   });
+
+  // Core-loop API (users, transactions, portfolio).
+  await registerApiRoutes(app);
 
   return app;
 }
