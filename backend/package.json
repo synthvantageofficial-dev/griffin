@@ -14,6 +14,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "demo": "tsx src/demo/runLoop.ts",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\""
   },
   "dependencies": {
