@@ -2,7 +2,7 @@
 
 > **Name:** Owna (an "invest where you shop" app for India) — chosen 2026-10-02; verify domain/handle/trademark before heavy use. Brand look (from landing page): blue #2589D2, pink #DB406C, dark #121516, Metropolis font (Grifin-style, per founder's request).
 > **One-liner:** Jab bhi user kisi **publicly-listed company** par kharch karta hai, hum us kharch ka ek chhota hissa jama karte hain, aur jaise hi us company ke **1 poore share** jitna paisa jama ho jaata hai, uske liye **usi company ka 1 share automatically execute** kar dete hain. (India-adapted "Grifin" model.)
-> **Last updated:** 2026-09-30
+> **Last updated:** 2026-10-02
 
 This file is the single source of truth for the project. Read it fully at the start of every session before writing code. Keep it updated as decisions are made.
 
@@ -95,6 +95,17 @@ We must know when the user spends at a listed company. Options, ranked:
 ---
 
 ## 6. Merchant → Listed Company Mapping + Eligibility Decision Tree
+
+> **CORE PRINCIPLE — we invest in the SELLER you pay, not the products in the basket.**
+> Payment feeds (UPI/card/bank) only ever reveal the **merchant who received the money** —
+> never the individual product brands bought. So "the brand" in our model = the seller/outlet
+> you transacted with (if listed), exactly like Grifin's "stock where you **shop**".
+> - Pay at a DMart till → you own **DMart** (not the HUL/ITC products on its shelves).
+> - Pay a local kirana via personal QR → merchant = the shop owner (unlisted) → **fallback ETF**
+>   (even if you bought a listed product like Coke inside — that is invisible to us, by design).
+> - Therefore the mapping must list **sellers / outlets / apps / direct subscriptions**, NOT
+>   product-maker brands (Maggi, Dove, Surf…) — those never appear as a merchant.
+> - Cards carry MCC + a cleaner merchant name; a co-branded card (Phase 4) is the cleanest source.
 
 - Build a **mapping engine**: merchant name/MCC/UPI VPA → listed entity → NSE/BSE symbol.
 - Start curated: **top ~200 listed consumer-facing brands** in India (Reliance/retail, Tata brands, HUL, ITC, Titan, DMart/Avenue Supermarts, Zomato, Nykaa, Paytm, etc.).

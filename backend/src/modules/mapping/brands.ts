@@ -42,11 +42,10 @@ export const BRANDS: readonly BrandEntry[] = [
   { patterns: ['vodafoneidea', 'vodafone'], listing: 'india_listed', symbol: 'IDEA', entityName: 'Vodafone Idea' },
   { patterns: ['indigo', 'goindigo'], listing: 'india_listed', symbol: 'INDIGO', entityName: 'InterGlobe Aviation (IndiGo)' },
   { patterns: ['irctc'], listing: 'india_listed', symbol: 'IRCTC', entityName: 'IRCTC' },
-  { patterns: ['maggi', 'nescafe', 'kitkat', 'nestle'], listing: 'india_listed', symbol: 'NESTLEIND', entityName: 'Nestle India' },
-  { patterns: ['aashirvaad', 'sunfeast', 'bingo', 'yippee', 'itc'], listing: 'india_listed', symbol: 'ITC', entityName: 'ITC Ltd' },
-  { patterns: ['surf excel', 'dove', 'lux', 'lifebuoy', 'rin', 'hindustan unilever', 'hul'], listing: 'india_listed', symbol: 'HINDUNILVR', entityName: 'Hindustan Unilever' },
-  { patterns: ['asian paints'], listing: 'india_listed', symbol: 'ASIANPAINT', entityName: 'Asian Paints' },
-  { patterns: ['tata salt', 'tata tea', 'tata consumer', 'tata cliq'], listing: 'india_listed', symbol: 'TATACONSUM', entityName: 'Tata Consumer Products' },
+  // NOTE: pure product-makers (Nestle/Maggi, HUL/Surf/Dove, ITC/Aashirvaad, Asian Paints,
+  // Tata Consumer staples) are intentionally NOT mapped by product name. You pay the SHOP,
+  // not the product, so those brand names never appear as a merchant. Only sellers / outlets
+  // / apps / direct subscriptions belong in this list (CLAUDE.md §6 core principle).
 
   // --- Listed ONLY abroad (no listed Indian entity) -> Phase 2 US route ---
   { patterns: ['amazon'], listing: 'abroad_listed', foreignSymbol: 'AMZN', entityName: 'Amazon.com Inc' },
