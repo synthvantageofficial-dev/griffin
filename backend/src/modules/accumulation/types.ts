@@ -23,6 +23,8 @@ export interface MerchantMapping {
   readonly symbol?: string;
   /** Foreign symbol (e.g. 'AMZN') — present when listing is 'abroad_listed'. Phase 2. */
   readonly foreignSymbol?: string;
+  /** Human-readable listed entity, for display (e.g. 'Jubilant FoodWorks'). */
+  readonly entityName?: string;
 }
 
 /** The concrete, deterministic target a set-aside goes to. */
