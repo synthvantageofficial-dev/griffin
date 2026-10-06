@@ -1,21 +1,27 @@
 /**
- * HTTP API for the core loop (dev; backed by the in-memory store).
+ * HTTP API for the core loop.
  *
  *   POST /users                      -> create a user (round-up rule + fallback)
  *   GET  /users/:id                  -> user config
  *   POST /users/:id/transactions     -> process one detected spend
  *   GET  /users/:id/portfolio        -> holdings + accumulating balances
+ *
+ * Uses the Postgres store when DATABASE_URL is set, else an in-memory store.
  */
 import type { FastifyInstance } from 'fastify';
-import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { toPaise, paiseToRupees, formatINR } from '../../lib/money.js';
+import { env } from '../../config/env.js';
+import { getPool } from '../../db/pool.js';
 import { MockPriceProvider } from '../prices/priceProvider.js';
-import { applyTransaction, type SimConfig, type SimEvent } from '../simulation/runSimulation.js';
-import { InMemoryStore } from './store.js';
+import type { SimConfig, SimEvent } from '../simulation/runSimulation.js';
+import { InMemoryStore, type AccumulationStore } from './store.js';
+import { PgStore } from './pgStore.js';
 
 const prices = new MockPriceProvider();
-const store = new InMemoryStore();
+const store: AccumulationStore = env.DATABASE_URL
+  ? new PgStore(getPool(), prices)
+  : new InMemoryStore(prices);
 
 const createUserSchema = z
   .object({
@@ -50,81 +56,70 @@ function buildConfig(body: z.infer<typeof createUserSchema>): SimConfig {
   };
 }
 
-/** Shape a SimEvent into a clean API response. */
 function eventView(e: SimEvent) {
   return {
     ref: e.ref,
     merchant: e.merchant,
     target: { kind: e.kind, symbol: e.symbol, entityName: e.entityName },
     setAside: { paise: e.roundupPaise, display: formatINR(e.roundupPaise) },
-    bought: e.boughtQty > 0 ? { qty: e.boughtQty, costPaise: e.boughtCostPaise, costDisplay: formatINR(e.boughtCostPaise) } : null,
+    bought:
+      e.boughtQty > 0
+        ? { qty: e.boughtQty, costPaise: e.boughtCostPaise, costDisplay: formatINR(e.boughtCostPaise) }
+        : null,
     balance: { paise: e.balancePaise, display: formatINR(e.balancePaise), rupees: paiseToRupees(e.balancePaise) },
     progressPct: e.progressPct,
   };
+}
+
+function configView(config: SimConfig) {
+  return { fallbackSymbol: config.fallbackEtfSymbol, rule: config.rule };
 }
 
 export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
   app.post('/users', async (req, reply) => {
     const parsed = createUserSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: 'invalid body', details: parsed.error.flatten() });
-    const userId = randomUUID();
-    const user = store.createUser(userId, buildConfig(parsed.data));
+    const config = buildConfig(parsed.data);
+    const userId = await store.createUser(config);
     reply.code(201);
-    return { userId, config: { fallbackSymbol: user.config.fallbackEtfSymbol, rule: user.config.rule } };
+    return { userId, config: configView(config) };
   });
 
   app.get('/users/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const user = store.getUser(id);
-    if (!user) return reply.code(404).send({ error: 'user not found' });
-    return { userId: user.userId, config: { fallbackSymbol: user.config.fallbackEtfSymbol, rule: user.config.rule } };
+    const config = await store.getUserConfig(id);
+    if (!config) return reply.code(404).send({ error: 'user not found' });
+    return { userId: id, config: configView(config) };
   });
 
   app.post('/users/:id/transactions', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const user = store.getUser(id);
-    if (!user) return reply.code(404).send({ error: 'user not found' });
-
     const parsed = txnSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid body', details: parsed.error.flatten() });
     const body = parsed.data;
 
-    // Idempotency: the same (ref) is processed at most once.
-    const prior = user.processed.get(body.ref);
-    if (prior) return { duplicate: true, ...eventView(prior) };
+    const result = await store.processTransaction(id, {
+      ref: body.ref,
+      merchant: body.merchant,
+      amountPaise: toPaise(body.amountPaise),
+    });
+    if (!result) return reply.code(404).send({ error: 'user not found' });
 
-    const event = applyTransaction(
-      user.state,
-      { ref: body.ref, merchant: body.merchant, amountPaise: toPaise(body.amountPaise) },
-      user.config,
-      prices,
-    );
-    user.processed.set(body.ref, event);
-    reply.code(201);
-    return { duplicate: false, ...eventView(event) };
+    if (!result.duplicate) reply.code(201);
+    return { duplicate: result.duplicate, ...eventView(result.event) };
   });
 
   app.get('/users/:id/portfolio', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const user = store.getUser(id);
-    if (!user) return reply.code(404).send({ error: 'user not found' });
-
-    const { holdings, balances, names } = user.state;
+    const portfolio = await store.getPortfolio(id);
+    if (!portfolio) return reply.code(404).send({ error: 'user not found' });
     return {
-      userId: user.userId,
-      holdings: [...holdings.entries()].map(([symbol, qty]) => ({
-        symbol,
-        name: names.get(symbol) ?? symbol,
-        qty,
+      userId: portfolio.userId,
+      holdings: portfolio.holdings,
+      accumulating: portfolio.accumulating.map((a) => ({
+        ...a,
+        balanceDisplay: formatINR(toPaise(a.balancePaise)),
       })),
-      accumulating: [...balances.entries()]
-        .filter(([, bal]) => bal > 0)
-        .map(([symbol, bal]) => ({
-          symbol,
-          name: names.get(symbol) ?? symbol,
-          balancePaise: bal,
-          balanceDisplay: formatINR(bal),
-        })),
     };
   });
 }
