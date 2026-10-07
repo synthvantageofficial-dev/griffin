@@ -258,14 +258,15 @@ The target is always **deterministic** from this tree + the user's pre-set fallb
 - [x] Merchant → company mapping — sellers/outlets only (Zomato→ETERNAL, McDonald's→WESTLIFE…)
 - [x] Mock price feed — `PriceProvider` interface + `MockPriceProvider`
 - [x] Simulation + demo — `npm run demo`
-- [x] REST API — `POST /users`, `GET /users/:id`, `POST /users/:id/transactions`, `GET .../portfolio` + zod + idempotency
+- [x] REST API + zod + idempotency (now auth-based, see below)
 - [x] **Persistence** — `PgStore` on Supabase Postgres (`DATABASE_URL` in `backend/.env`). LIVE, verified end-to-end.
 - [x] **Unmapped-merchant logging** — unknown sellers recorded with hit counts (migration 0005, `GET /admin/unmapped-merchants`), verified live. Store is now dependency-injected into `buildServer` so tests use in-memory (fast/isolated).
 
 - [x] **Batch sweep job** — `store.runSweep()` re-checks every balance vs current price and buys whole shares now coverable (handles price drops / weekly-invest). `POST /admin/run-sweep`, atomic in PgStore, verified live. NOTE: still needs wiring to an actual scheduler (cron/queue) at deploy time.
 
+- [x] **Auth / login** — email + password (scrypt hash, no plaintext) → JWT (migration 0006). Routes: `POST /auth/signup`, `POST /auth/login`, token-protected `GET /me`, `POST /me/transactions`, `GET /me/portfolio` (userId from token, no IDOR). Admin routes (`/admin/*`) protected by `x-admin-key` (env `ADMIN_API_KEY`). Prod refuses default secrets. Verified live.
+
 **Group A — remaining (pure software, no partnership needed) — do ONE BY ONE:**
-- [ ] Auth / login (real users + sessions; currently just a userId)
 - [ ] Consent records (DPDP) + user rule management endpoints
 - [ ] Reconciliation + audit surfacing
 
@@ -273,4 +274,4 @@ The target is always **deterministic** from this tree + the user's pre-set fallb
 
 **Ops pending (small, one-time):** GitHub push (`gh` installed, not logged in) · landing page live deploy.
 
-_Last build update: 2026-10-07 · 49 tests passing._
+_Last build update: 2026-10-07 · 52 tests passing._

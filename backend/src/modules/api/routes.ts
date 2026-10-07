@@ -1,30 +1,37 @@
 /**
- * HTTP API for the core loop.
+ * HTTP API for the core loop, with auth.
  *
- *   POST /users                      -> create a user (round-up rule + fallback)
- *   GET  /users/:id                  -> user config
- *   POST /users/:id/transactions     -> process one detected spend
- *   GET  /users/:id/portfolio        -> holdings + accumulating balances
+ *   POST /auth/signup                -> create account (email+password) -> token
+ *   POST /auth/login                 -> token
+ *   GET  /me                         -> my config            (Bearer token)
+ *   POST /me/transactions            -> process one spend    (Bearer token)
+ *   GET  /me/portfolio               -> my holdings/balances (Bearer token)
+ *   GET  /admin/unmapped-merchants   -> ops (x-admin-key)
+ *   POST /admin/run-sweep            -> ops (x-admin-key)
  *
- * Uses the Postgres store when DATABASE_URL is set, else an in-memory store.
+ * Users only ever touch their OWN data (userId comes from the token, not the URL).
  */
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { toPaise, paiseToRupees, formatINR } from '../../lib/money.js';
+import { env } from '../../config/env.js';
+import { hashPassword, verifyPassword } from '../auth/password.js';
+import { signToken, verifyToken } from '../auth/jwt.js';
 import type { SimConfig, SimEvent } from '../simulation/runSimulation.js';
 import type { AccumulationStore } from './store.js';
 
-const createUserSchema = z
-  .object({
-    roundup: z
-      .object({
-        type: z.enum(['round_up_nearest', 'fixed']),
-        valuePaise: z.number().int().positive(),
-      })
-      .optional(),
-    fallbackSymbol: z.string().min(1).max(20).optional(),
-  })
+const roundupSchema = z
+  .object({ type: z.enum(['round_up_nearest', 'fixed']), valuePaise: z.number().int().positive() })
   .optional();
+
+const signupSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(8).max(200),
+  roundup: roundupSchema,
+  fallbackSymbol: z.string().min(1).max(20).optional(),
+});
+
+const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1).max(200) });
 
 const txnSchema = z.object({
   merchant: z.string().min(1).max(140),
@@ -32,8 +39,8 @@ const txnSchema = z.object({
   ref: z.string().min(1).max(80),
 });
 
-function buildConfig(body: z.infer<typeof createUserSchema>): SimConfig {
-  const r = body?.roundup;
+function buildConfig(body: { roundup?: z.infer<typeof roundupSchema>; fallbackSymbol?: string | undefined }): SimConfig {
+  const r = body.roundup;
   const rule =
     r?.type === 'fixed'
       ? ({ type: 'fixed', amountPaise: toPaise(r.valuePaise) } as const)
@@ -42,7 +49,7 @@ function buildConfig(body: z.infer<typeof createUserSchema>): SimConfig {
         : ({ type: 'round_up_nearest', nearestPaise: toPaise(1000) } as const); // default ₹10
   return {
     rule,
-    fallbackEtfSymbol: body?.fallbackSymbol ?? 'NIFTYBEES',
+    fallbackEtfSymbol: body.fallbackSymbol ?? 'NIFTYBEES',
     fallbackName: 'Nifty 50 ETF (fallback)',
   };
 }
@@ -66,59 +73,80 @@ function configView(config: SimConfig) {
   return { fallbackSymbol: config.fallbackEtfSymbol, rule: config.rule };
 }
 
+/** Returns the authenticated userId from a Bearer token, or null. */
+function bearerUserId(req: FastifyRequest): string | null {
+  const auth = req.headers.authorization;
+  if (!auth || !auth.startsWith('Bearer ')) return null;
+  return verifyToken(auth.slice(7));
+}
+
+function isAdmin(req: FastifyRequest): boolean {
+  return req.headers['x-admin-key'] === env.ADMIN_API_KEY;
+}
+
 export async function registerApiRoutes(app: FastifyInstance, store: AccumulationStore): Promise<void> {
-  app.post('/users', async (req, reply) => {
-    const parsed = createUserSchema.safeParse(req.body ?? {});
+  // ---- Auth ----
+  app.post('/auth/signup', async (req, reply) => {
+    const parsed = signupSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid body', details: parsed.error.flatten() });
+    const { email, password } = parsed.data;
     const config = buildConfig(parsed.data);
-    const userId = await store.createUser(config);
+    const passwordHash = await hashPassword(password);
+    const result = await store.createUser({ email, passwordHash, config });
+    if ('error' in result) return reply.code(409).send({ error: 'email already registered' });
     reply.code(201);
+    return { userId: result.userId, token: signToken(result.userId), config: configView(config) };
+  });
+
+  app.post('/auth/login', async (req, reply) => {
+    const parsed = loginSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid body' });
+    const creds = await store.findByEmail(parsed.data.email);
+    // Verify even when the user is missing would be ideal (timing); kept simple here.
+    if (!creds || !(await verifyPassword(parsed.data.password, creds.passwordHash))) {
+      return reply.code(401).send({ error: 'invalid email or password' });
+    }
+    return { userId: creds.userId, token: signToken(creds.userId) };
+  });
+
+  // ---- Authenticated user routes (userId from token) ----
+  const requireUser = (req: FastifyRequest, reply: FastifyReply): string | null => {
+    const userId = bearerUserId(req);
+    if (!userId) {
+      reply.code(401).send({ error: 'unauthorized' });
+      return null;
+    }
+    return userId;
+  };
+
+  app.get('/me', async (req, reply) => {
+    const userId = requireUser(req, reply);
+    if (!userId) return;
+    const config = await store.getUserConfig(userId);
+    if (!config) return reply.code(404).send({ error: 'user not found' });
     return { userId, config: configView(config) };
   });
 
-  app.get('/users/:id', async (req, reply) => {
-    const { id } = req.params as { id: string };
-    const config = await store.getUserConfig(id);
-    if (!config) return reply.code(404).send({ error: 'user not found' });
-    return { userId: id, config: configView(config) };
-  });
-
-  app.post('/users/:id/transactions', async (req, reply) => {
-    const { id } = req.params as { id: string };
+  app.post('/me/transactions', async (req, reply) => {
+    const userId = requireUser(req, reply);
+    if (!userId) return;
     const parsed = txnSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid body', details: parsed.error.flatten() });
-    const body = parsed.data;
-
-    const result = await store.processTransaction(id, {
-      ref: body.ref,
-      merchant: body.merchant,
-      amountPaise: toPaise(body.amountPaise),
+    const b = parsed.data;
+    const result = await store.processTransaction(userId, {
+      ref: b.ref,
+      merchant: b.merchant,
+      amountPaise: toPaise(b.amountPaise),
     });
     if (!result) return reply.code(404).send({ error: 'user not found' });
-
     if (!result.duplicate) reply.code(201);
     return { duplicate: result.duplicate, ...eventView(result.event) };
   });
 
-  // Ops view: merchants we couldn't map yet, most frequent first.
-  // TODO: protect with auth once auth lands (Group A).
-  app.get('/admin/unmapped-merchants', async (req) => {
-    const q = req.query as { limit?: string };
-    const limit = Math.min(Math.max(Number(q.limit) || 50, 1), 500);
-    return { unmapped: await store.topUnmapped(limit) };
-  });
-
-  // Batch sweep: buy whole shares for any balance that now covers >= 1 share.
-  // Intended to run on a weekly schedule (cron); exposed here to trigger/test.
-  // TODO: protect with auth; wire to a scheduler.
-  app.post('/admin/run-sweep', async () => {
-    const buys = await store.runSweep();
-    return { bought: buys.length, buys };
-  });
-
-  app.get('/users/:id/portfolio', async (req, reply) => {
-    const { id } = req.params as { id: string };
-    const portfolio = await store.getPortfolio(id);
+  app.get('/me/portfolio', async (req, reply) => {
+    const userId = requireUser(req, reply);
+    if (!userId) return;
+    const portfolio = await store.getPortfolio(userId);
     if (!portfolio) return reply.code(404).send({ error: 'user not found' });
     return {
       userId: portfolio.userId,
@@ -128,5 +156,19 @@ export async function registerApiRoutes(app: FastifyInstance, store: Accumulatio
         balanceDisplay: formatINR(toPaise(a.balancePaise)),
       })),
     };
+  });
+
+  // ---- Admin (x-admin-key) ----
+  app.get('/admin/unmapped-merchants', async (req, reply) => {
+    if (!isAdmin(req)) return reply.code(401).send({ error: 'unauthorized' });
+    const q = req.query as { limit?: string };
+    const limit = Math.min(Math.max(Number(q.limit) || 50, 1), 500);
+    return { unmapped: await store.topUnmapped(limit) };
+  });
+
+  app.post('/admin/run-sweep', async (req, reply) => {
+    if (!isAdmin(req)) return reply.code(401).send({ error: 'unauthorized' });
+    const buys = await store.runSweep();
+    return { bought: buys.length, buys };
   });
 }

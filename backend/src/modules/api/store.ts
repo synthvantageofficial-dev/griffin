@@ -48,8 +48,20 @@ export interface Portfolio {
   readonly accumulating: Array<{ symbol: string; name: string; balancePaise: number }>;
 }
 
+export interface CreateUserInput {
+  readonly email: string;
+  readonly passwordHash: string;
+  readonly config: SimConfig;
+}
+export type CreateUserResult = { readonly userId: string } | { readonly error: 'email_exists' };
+export interface Credentials {
+  readonly userId: string;
+  readonly passwordHash: string;
+}
+
 export interface AccumulationStore {
-  createUser(config: SimConfig): Promise<string>;
+  createUser(input: CreateUserInput): Promise<CreateUserResult>;
+  findByEmail(email: string): Promise<Credentials | null>;
   getUserConfig(userId: string): Promise<SimConfig | null>;
   /** Process one spend atomically. Returns null if the user does not exist. */
   processTransaction(userId: string, txn: SampleTxn): Promise<ProcessResult | null>;
@@ -61,13 +73,20 @@ export interface AccumulationStore {
 }
 
 interface MemUser {
+  readonly email: string;
+  readonly passwordHash: string;
   readonly config: SimConfig;
   readonly state: LoopState;
   readonly processed: Map<string, SimEvent>;
 }
 
+function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
 export class InMemoryStore implements AccumulationStore {
   private readonly users = new Map<string, MemUser>();
+  private readonly emailIndex = new Map<string, string>(); // email -> userId
   private readonly unmapped = new Map<string, { sample: string; hits: number }>();
 
   constructor(private readonly prices: PriceProvider) {}
@@ -86,10 +105,27 @@ export class InMemoryStore implements AccumulationStore {
       .slice(0, limit);
   }
 
-  async createUser(config: SimConfig): Promise<string> {
+  async createUser(input: CreateUserInput): Promise<CreateUserResult> {
+    const email = normalizeEmail(input.email);
+    if (this.emailIndex.has(email)) return { error: 'email_exists' };
     const userId = randomUUID();
-    this.users.set(userId, { config, state: newLoopState(), processed: new Map() });
-    return userId;
+    this.users.set(userId, {
+      email,
+      passwordHash: input.passwordHash,
+      config: input.config,
+      state: newLoopState(),
+      processed: new Map(),
+    });
+    this.emailIndex.set(email, userId);
+    return { userId };
+  }
+
+  async findByEmail(email: string): Promise<Credentials | null> {
+    const userId = this.emailIndex.get(normalizeEmail(email));
+    if (!userId) return null;
+    const user = this.users.get(userId);
+    if (!user) return null;
+    return { userId, passwordHash: user.passwordHash };
   }
 
   async getUserConfig(userId: string): Promise<SimConfig | null> {

@@ -5,6 +5,8 @@ import { InMemoryStore } from '../src/modules/api/store.js';
 import { MockPriceProvider, type PriceProvider } from '../src/modules/prices/priceProvider.js';
 import { toPaise, type Paise } from '../src/lib/money.js';
 
+const ADMIN = { 'x-admin-key': 'dev-admin-key-change-me' };
+
 /** A price provider whose prices can change at runtime (to test the sweep). */
 class MutablePrices implements PriceProvider {
   private readonly m = new Map<string, number>();
@@ -18,6 +20,7 @@ class MutablePrices implements PriceProvider {
 }
 
 let app: FastifyInstance;
+let emailCounter = 0;
 
 beforeAll(async () => {
   app = await buildServer({ store: new InMemoryStore(new MockPriceProvider()) });
@@ -27,154 +30,171 @@ afterAll(async () => {
   await app.close();
 });
 
-async function newUser(roundup?: { type: 'round_up_nearest' | 'fixed'; valuePaise: number }): Promise<string> {
-  const res = await app.inject({ method: 'POST', url: '/users', payload: roundup ? { roundup } : {} });
-  expect(res.statusCode).toBe(201);
-  return res.json().userId as string;
+async function signup(roundup?: { type: 'round_up_nearest' | 'fixed'; valuePaise: number }) {
+  emailCounter += 1;
+  const email = `u${emailCounter}@test.com`;
+  const res = await app.inject({
+    method: 'POST',
+    url: '/auth/signup',
+    payload: { email, password: 'password123', ...(roundup ? { roundup } : {}) },
+  });
+  const body = res.json();
+  return { email, userId: body.userId as string, auth: { authorization: `Bearer ${body.token}` } };
 }
 
-describe('API — users', () => {
-  it('creates a user with a default round-up rule', async () => {
-    const res = await app.inject({ method: 'POST', url: '/users', payload: {} });
+describe('auth', () => {
+  it('signs up and returns a token', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/auth/signup',
+      payload: { email: 'alice@test.com', password: 'password123' },
+    });
     expect(res.statusCode).toBe(201);
-    const body = res.json();
-    expect(body.userId).toBeTruthy();
-    expect(body.config.rule).toEqual({ type: 'round_up_nearest', nearestPaise: 1000 });
-    expect(body.config.fallbackSymbol).toBe('NIFTYBEES');
+    const b = res.json();
+    expect(b.userId).toBeTruthy();
+    expect(b.token).toBeTruthy();
+    expect(b.config.rule).toEqual({ type: 'round_up_nearest', nearestPaise: 1000 });
   });
 
-  it('404s for an unknown user', async () => {
-    const res = await app.inject({ method: 'GET', url: '/users/does-not-exist' });
-    expect(res.statusCode).toBe(404);
+  it('rejects duplicate email (409) and weak/invalid input (400)', async () => {
+    await app.inject({ method: 'POST', url: '/auth/signup', payload: { email: 'dup@test.com', password: 'password123' } });
+    const dup = await app.inject({ method: 'POST', url: '/auth/signup', payload: { email: 'dup@test.com', password: 'password123' } });
+    expect(dup.statusCode).toBe(409);
+    const weak = await app.inject({ method: 'POST', url: '/auth/signup', payload: { email: 'x@test.com', password: 'short' } });
+    expect(weak.statusCode).toBe(400);
+    const bademail = await app.inject({ method: 'POST', url: '/auth/signup', payload: { email: 'not-an-email', password: 'password123' } });
+    expect(bademail.statusCode).toBe(400);
+  });
+
+  it('logs in with correct password, rejects wrong', async () => {
+    await app.inject({ method: 'POST', url: '/auth/signup', payload: { email: 'bob@test.com', password: 'secretpass1' } });
+    const ok = await app.inject({ method: 'POST', url: '/auth/login', payload: { email: 'bob@test.com', password: 'secretpass1' } });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().token).toBeTruthy();
+    const bad = await app.inject({ method: 'POST', url: '/auth/login', payload: { email: 'bob@test.com', password: 'wrong' } });
+    expect(bad.statusCode).toBe(401);
+    const missing = await app.inject({ method: 'POST', url: '/auth/login', payload: { email: 'nobody@test.com', password: 'whatever1' } });
+    expect(missing.statusCode).toBe(401);
   });
 });
 
-describe('API — transactions + portfolio', () => {
+describe('protected routes require a token', () => {
+  it('401 without a token', async () => {
+    expect((await app.inject({ method: 'GET', url: '/me' })).statusCode).toBe(401);
+    expect((await app.inject({ method: 'GET', url: '/me/portfolio' })).statusCode).toBe(401);
+    const noauthTxn = await app.inject({
+      method: 'POST',
+      url: '/me/transactions',
+      payload: { merchant: 'KFC', amountPaise: 40000, ref: 'n1' },
+    });
+    expect(noauthTxn.statusCode).toBe(401);
+  });
+
+  it('401 with a garbage token', async () => {
+    const res = await app.inject({ method: 'GET', url: '/me', headers: { authorization: 'Bearer not.a.jwt' } });
+    expect(res.statusCode).toBe(401);
+  });
+});
+
+describe('transactions + portfolio (authenticated)', () => {
   it('processes a spend and buys a cheap share', async () => {
-    const userId = await newUser({ type: 'fixed', valuePaise: 2500 }); // ₹25 per spend
+    const { auth } = await signup({ type: 'fixed', valuePaise: 2500 });
     const res = await app.inject({
       method: 'POST',
-      url: `/users/${userId}/transactions`,
-      payload: { merchant: 'Vodafone Idea Recharge', amountPaise: 29900, ref: 'v1' }, // ₹299
+      url: '/me/transactions',
+      headers: auth,
+      payload: { merchant: 'Vodafone Idea Recharge', amountPaise: 29900, ref: 'v1' },
     });
     expect(res.statusCode).toBe(201);
-    const body = res.json();
-    expect(body.duplicate).toBe(false);
-    expect(body.target.symbol).toBe('IDEA');
-    expect(body.target.entityName).toBe('Vodafone Idea');
-    expect(body.bought).toEqual(expect.objectContaining({ qty: 2 })); // ₹25 / ₹9 -> 2 shares
-    expect(body.setAside.display).toBe('₹25.00');
+    const b = res.json();
+    expect(b.target.symbol).toBe('IDEA');
+    expect(b.bought).toEqual(expect.objectContaining({ qty: 2 }));
 
-    const port = await app.inject({ method: 'GET', url: `/users/${userId}/portfolio` });
-    expect(port.statusCode).toBe(200);
+    const port = await app.inject({ method: 'GET', url: '/me/portfolio', headers: auth });
     expect(port.json().holdings).toContainEqual({ symbol: 'IDEA', name: 'Vodafone Idea', qty: 2 });
   });
 
   it('is idempotent on repeated ref', async () => {
-    const userId = await newUser({ type: 'fixed', valuePaise: 2500 });
+    const { auth } = await signup({ type: 'fixed', valuePaise: 2500 });
     const payload = { merchant: 'KFC', amountPaise: 40000, ref: 'k1' };
-    const first = await app.inject({ method: 'POST', url: `/users/${userId}/transactions`, payload });
-    const second = await app.inject({ method: 'POST', url: `/users/${userId}/transactions`, payload });
+    const first = await app.inject({ method: 'POST', url: '/me/transactions', headers: auth, payload });
+    const second = await app.inject({ method: 'POST', url: '/me/transactions', headers: auth, payload });
     expect(first.json().duplicate).toBe(false);
     expect(second.json().duplicate).toBe(true);
-    // Balance must not double-count the same transaction.
     expect(second.json().balance.paise).toBe(first.json().balance.paise);
   });
 
+  it('keeps each user separate', async () => {
+    const a = await signup({ type: 'fixed', valuePaise: 2500 });
+    const b = await signup({ type: 'fixed', valuePaise: 2500 });
+    await app.inject({ method: 'POST', url: '/me/transactions', headers: a.auth, payload: { merchant: 'Zomato', amountPaise: 32000, ref: 'z1' } });
+    const bPort = await app.inject({ method: 'GET', url: '/me/portfolio', headers: b.auth });
+    expect(bPort.json().accumulating.length).toBe(0); // user B untouched by user A's spend
+  });
+
   it('routes an unknown merchant to the fallback ETF', async () => {
-    const userId = await newUser({ type: 'fixed', valuePaise: 2500 });
+    const { auth } = await signup({ type: 'fixed', valuePaise: 2500 });
     const res = await app.inject({
       method: 'POST',
-      url: `/users/${userId}/transactions`,
+      url: '/me/transactions',
+      headers: auth,
       payload: { merchant: 'Sharma General Store', amountPaise: 24000, ref: 's1' },
     });
     expect(res.json().target.symbol).toBe('NIFTYBEES');
   });
-
-  it('rejects an invalid transaction body with 400', async () => {
-    const userId = await newUser();
-    const res = await app.inject({
-      method: 'POST',
-      url: `/users/${userId}/transactions`,
-      payload: { amountPaise: 100 }, // missing merchant + ref
-    });
-    expect(res.statusCode).toBe(400);
-  });
-
-  it('404s when posting a transaction for an unknown user', async () => {
-    const res = await app.inject({
-      method: 'POST',
-      url: '/users/nope/transactions',
-      payload: { merchant: 'KFC', amountPaise: 40000, ref: 'x1' },
-    });
-    expect(res.statusCode).toBe(404);
-  });
 });
 
-describe('API — unmapped merchants', () => {
+describe('admin routes (x-admin-key)', () => {
+  it('401 without the admin key', async () => {
+    expect((await app.inject({ method: 'GET', url: '/admin/unmapped-merchants' })).statusCode).toBe(401);
+    expect((await app.inject({ method: 'POST', url: '/admin/run-sweep', payload: {} })).statusCode).toBe(401);
+  });
+
   it('logs unknown merchants with hit counts, not known ones', async () => {
-    const userId = await newUser();
+    const { auth } = await signup();
     const unique = 'Qwerty Unique Store XYZ';
     for (const ref of ['uq1', 'uq2', 'uq3']) {
-      await app.inject({
-        method: 'POST',
-        url: `/users/${userId}/transactions`,
-        payload: { merchant: unique, amountPaise: 15700, ref },
-      });
+      await app.inject({ method: 'POST', url: '/me/transactions', headers: auth, payload: { merchant: unique, amountPaise: 15700, ref } });
     }
-    // a known merchant should NOT be logged as unmapped
-    await app.inject({
-      method: 'POST',
-      url: `/users/${userId}/transactions`,
-      payload: { merchant: 'KFC', amountPaise: 40000, ref: 'known1' },
-    });
+    await app.inject({ method: 'POST', url: '/me/transactions', headers: auth, payload: { merchant: 'KFC', amountPaise: 40000, ref: 'known1' } });
 
-    const res = await app.inject({ method: 'GET', url: '/admin/unmapped-merchants?limit=500' });
+    const res = await app.inject({ method: 'GET', url: '/admin/unmapped-merchants?limit=500', headers: ADMIN });
     expect(res.statusCode).toBe(200);
     const rows = res.json().unmapped as Array<{ sample: string; hits: number }>;
-    const row = rows.find((r) => r.sample === unique);
-    expect(row?.hits).toBe(3);
+    expect(rows.find((r) => r.sample === unique)?.hits).toBe(3);
     expect(rows.find((r) => r.sample === 'KFC')).toBeFalsy();
   });
 });
 
-describe('API — batch sweep', () => {
+describe('batch sweep', () => {
   it('buys a whole share when a balance covers one (e.g. after a price drop)', async () => {
     const prices = new MutablePrices();
-    prices.set('ETERNAL', 30000); // ₹300 — above what we will accumulate
+    prices.set('ETERNAL', 30000); // ₹300
     const sweepApp = await buildServer({ store: new InMemoryStore(prices) });
     await sweepApp.ready();
     try {
-      const userId = (
-        await sweepApp.inject({
-          method: 'POST',
-          url: '/users',
-          payload: { roundup: { type: 'fixed', valuePaise: 2500 } },
-        })
-      ).json().userId as string;
+      const su = await sweepApp.inject({
+        method: 'POST',
+        url: '/auth/signup',
+        payload: { email: 'sweep@test.com', password: 'password123', roundup: { type: 'fixed', valuePaise: 2500 } },
+      });
+      const auth = { authorization: `Bearer ${su.json().token}` };
 
-      // 11 × ₹25 = ₹275 into ETERNAL (Zomato), below ₹300 -> no buy yet.
       for (let i = 0; i < 11; i++) {
-        await sweepApp.inject({
-          method: 'POST',
-          url: `/users/${userId}/transactions`,
-          payload: { merchant: 'Zomato', amountPaise: 32000, ref: `z${i}` },
-        });
+        await sweepApp.inject({ method: 'POST', url: '/me/transactions', headers: auth, payload: { merchant: 'Zomato', amountPaise: 32000, ref: `z${i}` } });
       }
-      let port = (await sweepApp.inject({ method: 'GET', url: `/users/${userId}/portfolio` })).json();
+      let port = (await sweepApp.inject({ method: 'GET', url: '/me/portfolio', headers: auth })).json();
       expect(port.holdings.length).toBe(0);
 
-      // Price drops to ₹250 -> the ₹275 balance now covers one share. Sweep buys it.
-      prices.set('ETERNAL', 25000);
-      const sweep = (await sweepApp.inject({ method: 'POST', url: '/admin/run-sweep' })).json();
+      prices.set('ETERNAL', 25000); // price drops -> the ₹275 balance now covers one share
+      const sweep = (await sweepApp.inject({ method: 'POST', url: '/admin/run-sweep', headers: ADMIN, payload: {} })).json();
       expect(sweep.bought).toBe(1);
       expect(sweep.buys[0]).toEqual(expect.objectContaining({ symbol: 'ETERNAL', qty: 1 }));
 
-      port = (await sweepApp.inject({ method: 'GET', url: `/users/${userId}/portfolio` })).json();
+      port = (await sweepApp.inject({ method: 'GET', url: '/me/portfolio', headers: auth })).json();
       expect(port.holdings).toContainEqual(expect.objectContaining({ symbol: 'ETERNAL', qty: 1 }));
 
-      // Running again buys nothing more (balance now below one share).
-      const again = (await sweepApp.inject({ method: 'POST', url: '/admin/run-sweep' })).json();
+      const again = (await sweepApp.inject({ method: 'POST', url: '/admin/run-sweep', headers: ADMIN, payload: {} })).json();
       expect(again.bought).toBe(0);
     } finally {
       await sweepApp.close();

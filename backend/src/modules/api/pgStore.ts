@@ -13,7 +13,16 @@ import { resolveTarget } from '../accumulation/routing.js';
 import { processPurchase, progressPercent, evaluateExecution } from '../accumulation/engine.js';
 import type { RoundupRule } from '../accumulation/types.js';
 import type { PriceProvider } from '../prices/priceProvider.js';
-import type { AccumulationStore, Portfolio, ProcessResult, UnmappedMerchant, SweepBuy } from './store.js';
+import type {
+  AccumulationStore,
+  Portfolio,
+  ProcessResult,
+  UnmappedMerchant,
+  SweepBuy,
+  CreateUserInput,
+  CreateUserResult,
+  Credentials,
+} from './store.js';
 import type { SimConfig, SampleTxn } from '../simulation/runSimulation.js';
 
 function ruleFromRow(type: string, valuePaise: number): RoundupRule {
@@ -28,14 +37,37 @@ export class PgStore implements AccumulationStore {
     private readonly prices: PriceProvider,
   ) {}
 
-  async createUser(config: SimConfig): Promise<string> {
+  async createUser(input: CreateUserInput): Promise<CreateUserResult> {
+    const { config } = input;
     const valuePaise = config.rule.type === 'fixed' ? config.rule.amountPaise : config.rule.nearestPaise;
+    try {
+      const res = await this.pool.query(
+        `insert into users (email, password_hash, rule_type, rule_value_paise, fallback_symbol, fallback_name)
+         values ($1, $2, $3, $4, $5, $6) returning id`,
+        [
+          input.email.trim().toLowerCase(),
+          input.passwordHash,
+          config.rule.type,
+          valuePaise,
+          config.fallbackEtfSymbol,
+          config.fallbackName ?? 'Index ETF (fallback)',
+        ],
+      );
+      return { userId: res.rows[0].id as string };
+    } catch (err) {
+      if ((err as { code?: string }).code === '23505') return { error: 'email_exists' }; // unique violation
+      throw err;
+    }
+  }
+
+  async findByEmail(email: string): Promise<Credentials | null> {
     const res = await this.pool.query(
-      `insert into users (rule_type, rule_value_paise, fallback_symbol, fallback_name)
-       values ($1, $2, $3, $4) returning id`,
-      [config.rule.type, valuePaise, config.fallbackEtfSymbol, config.fallbackName ?? 'Index ETF (fallback)'],
+      `select id, password_hash from users where email = $1`,
+      [email.trim().toLowerCase()],
     );
-    return res.rows[0].id as string;
+    const row = res.rows[0];
+    if (!row || !row.password_hash) return null;
+    return { userId: row.id as string, passwordHash: row.password_hash as string };
   }
 
   async getUserConfig(userId: string): Promise<SimConfig | null> {

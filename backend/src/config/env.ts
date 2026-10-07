@@ -13,6 +13,9 @@ const EnvSchema = z.object({
   // Supabase Postgres connection string. Optional for now so the server can boot
   // before the DB is wired; DB routes report "not_configured" until it is set.
   DATABASE_URL: z.string().min(1).optional(),
+  // Auth. Dev defaults let the app boot locally; MUST be overridden in production.
+  JWT_SECRET: z.string().min(16).default('dev-insecure-jwt-secret-change-me'),
+  ADMIN_API_KEY: z.string().min(8).default('dev-admin-key-change-me'),
 });
 
 const parsed = EnvSchema.safeParse(process.env);
@@ -25,3 +28,12 @@ if (!parsed.success) {
 
 export const env = parsed.data;
 export type Env = typeof env;
+
+if (
+  env.NODE_ENV === 'production' &&
+  (env.JWT_SECRET === 'dev-insecure-jwt-secret-change-me' || env.ADMIN_API_KEY === 'dev-admin-key-change-me')
+) {
+  // eslint-disable-next-line no-console
+  console.error('❌ Refusing to start in production with default JWT_SECRET/ADMIN_API_KEY. Set real secrets.');
+  process.exit(1);
+}
