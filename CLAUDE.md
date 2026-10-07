@@ -272,6 +272,10 @@ The target is always **deterministic** from this tree + the user's pre-set fallb
 
 **Then (later, after Group A):** Mobile app (React Native) · External integrations (broker API, Account Aggregator, UPI AutoPay, KYC, liquid-fund) · Business/legal/ops.
 
-**Ops pending (small, one-time):** GitHub push (`gh` installed, not logged in) · landing page live deploy.
+**Deployment — LIVE (staging) 🚀 (2026-10-07)**
+- **Code:** GitHub `synthvantageofficial-dev/griffin` (main). **PUBLIC** — no secrets in repo (`.env` gitignored; only the Supabase anon key is in the landing page, which is public by design). TODO: consider renaming (repo is named "griffin", the US company) + making private.
+- **Backend:** Render web service `owna-backend` (Singapore, free) → **https://owna-backend.onrender.com** (`/health`, `/health/db` both ok). Secrets set as Render env vars: `DATABASE_URL`, `JWT_SECRET`, `ADMIN_API_KEY`, `NODE_ENV=production`, `HOST=0.0.0.0`. Build `cd backend && npm install --include=dev && npm run build`; start `cd backend && npm start`. **Auto-deploys on push to `main`.** Free plan cold-starts after idle (~50s first request).
+- **Landing:** Render static site `owna-landing` → **https://owna-landing.onrender.com** (publishPath `landing`, auto-deploys on push).
+- **DB:** Supabase Postgres (Mumbai). Full stack verified end-to-end live (signup → txn → portfolio).
 
-_Last build update: 2026-10-07 · 52 tests passing._
+_Last build update: 2026-10-07 · 52 tests passing · deployed live._
