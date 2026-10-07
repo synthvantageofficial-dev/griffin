@@ -1,11 +1,13 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildServer } from '../src/server.js';
+import { InMemoryStore } from '../src/modules/api/store.js';
+import { MockPriceProvider } from '../src/modules/prices/priceProvider.js';
 
 let app: FastifyInstance;
 
 beforeAll(async () => {
-  app = await buildServer();
+  app = await buildServer({ store: new InMemoryStore(new MockPriceProvider()) });
   await app.ready();
 });
 afterAll(async () => {
@@ -93,5 +95,32 @@ describe('API — transactions + portfolio', () => {
       payload: { merchant: 'KFC', amountPaise: 40000, ref: 'x1' },
     });
     expect(res.statusCode).toBe(404);
+  });
+});
+
+describe('API — unmapped merchants', () => {
+  it('logs unknown merchants with hit counts, not known ones', async () => {
+    const userId = await newUser();
+    const unique = 'Qwerty Unique Store XYZ';
+    for (const ref of ['uq1', 'uq2', 'uq3']) {
+      await app.inject({
+        method: 'POST',
+        url: `/users/${userId}/transactions`,
+        payload: { merchant: unique, amountPaise: 15700, ref },
+      });
+    }
+    // a known merchant should NOT be logged as unmapped
+    await app.inject({
+      method: 'POST',
+      url: `/users/${userId}/transactions`,
+      payload: { merchant: 'KFC', amountPaise: 40000, ref: 'known1' },
+    });
+
+    const res = await app.inject({ method: 'GET', url: '/admin/unmapped-merchants?limit=500' });
+    expect(res.statusCode).toBe(200);
+    const rows = res.json().unmapped as Array<{ sample: string; hits: number }>;
+    const row = rows.find((r) => r.sample === unique);
+    expect(row?.hits).toBe(3);
+    expect(rows.find((r) => r.sample === 'KFC')).toBeFalsy();
   });
 });

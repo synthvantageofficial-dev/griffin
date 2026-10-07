@@ -2,10 +2,19 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import helmet from '@fastify/helmet';
 import { env } from './config/env.js';
-import { pingDb } from './db/pool.js';
+import { getPool, pingDb } from './db/pool.js';
 import { registerApiRoutes } from './modules/api/routes.js';
+import { MockPriceProvider } from './modules/prices/priceProvider.js';
+import { InMemoryStore, type AccumulationStore } from './modules/api/store.js';
+import { PgStore } from './modules/api/pgStore.js';
 
-export async function buildServer(): Promise<FastifyInstance> {
+/** Postgres-backed store when DATABASE_URL is set, else in-memory (dev/tests). */
+function createStore(): AccumulationStore {
+  const prices = new MockPriceProvider();
+  return env.DATABASE_URL ? new PgStore(getPool(), prices) : new InMemoryStore(prices);
+}
+
+export async function buildServer(opts?: { store?: AccumulationStore }): Promise<FastifyInstance> {
   const app = Fastify({
     logger: {
       level: env.LOG_LEVEL,
@@ -33,7 +42,7 @@ export async function buildServer(): Promise<FastifyInstance> {
   });
 
   // Core-loop API (users, transactions, portfolio).
-  await registerApiRoutes(app);
+  await registerApiRoutes(app, opts?.store ?? createStore());
 
   return app;
 }

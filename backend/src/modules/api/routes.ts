@@ -11,17 +11,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { toPaise, paiseToRupees, formatINR } from '../../lib/money.js';
-import { env } from '../../config/env.js';
-import { getPool } from '../../db/pool.js';
-import { MockPriceProvider } from '../prices/priceProvider.js';
 import type { SimConfig, SimEvent } from '../simulation/runSimulation.js';
-import { InMemoryStore, type AccumulationStore } from './store.js';
-import { PgStore } from './pgStore.js';
-
-const prices = new MockPriceProvider();
-const store: AccumulationStore = env.DATABASE_URL
-  ? new PgStore(getPool(), prices)
-  : new InMemoryStore(prices);
+import type { AccumulationStore } from './store.js';
 
 const createUserSchema = z
   .object({
@@ -75,7 +66,7 @@ function configView(config: SimConfig) {
   return { fallbackSymbol: config.fallbackEtfSymbol, rule: config.rule };
 }
 
-export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
+export async function registerApiRoutes(app: FastifyInstance, store: AccumulationStore): Promise<void> {
   app.post('/users', async (req, reply) => {
     const parsed = createUserSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: 'invalid body', details: parsed.error.flatten() });
@@ -107,6 +98,14 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
 
     if (!result.duplicate) reply.code(201);
     return { duplicate: result.duplicate, ...eventView(result.event) };
+  });
+
+  // Ops view: merchants we couldn't map yet, most frequent first.
+  // TODO: protect with auth once auth lands (Group A).
+  app.get('/admin/unmapped-merchants', async (req) => {
+    const q = req.query as { limit?: string };
+    const limit = Math.min(Math.max(Number(q.limit) || 50, 1), 500);
+    return { unmapped: await store.topUnmapped(limit) };
   });
 
   app.get('/users/:id/portfolio', async (req, reply) => {

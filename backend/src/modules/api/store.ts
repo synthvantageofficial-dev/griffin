@@ -10,6 +10,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { PriceProvider } from '../prices/priceProvider.js';
+import { resolveMerchant, normalize } from '../mapping/resolveMerchant.js';
 import {
   applyTransaction,
   newLoopState,
@@ -18,6 +19,12 @@ import {
   type SimEvent,
   type SampleTxn,
 } from '../simulation/runSimulation.js';
+
+export interface UnmappedMerchant {
+  readonly merchantKey: string;
+  readonly sample: string;
+  readonly hits: number;
+}
 
 export interface ProcessResult {
   readonly event: SimEvent;
@@ -36,6 +43,8 @@ export interface AccumulationStore {
   /** Process one spend atomically. Returns null if the user does not exist. */
   processTransaction(userId: string, txn: SampleTxn): Promise<ProcessResult | null>;
   getPortfolio(userId: string): Promise<Portfolio | null>;
+  /** Most-frequent merchants we couldn't map (to prioritize adding to the mapping). */
+  topUnmapped(limit: number): Promise<UnmappedMerchant[]>;
 }
 
 interface MemUser {
@@ -46,8 +55,23 @@ interface MemUser {
 
 export class InMemoryStore implements AccumulationStore {
   private readonly users = new Map<string, MemUser>();
+  private readonly unmapped = new Map<string, { sample: string; hits: number }>();
 
   constructor(private readonly prices: PriceProvider) {}
+
+  private recordUnmapped(rawMerchant: string): void {
+    const key = normalize(rawMerchant);
+    if (!key) return;
+    const existing = this.unmapped.get(key);
+    this.unmapped.set(key, { sample: rawMerchant, hits: (existing?.hits ?? 0) + 1 });
+  }
+
+  async topUnmapped(limit: number): Promise<UnmappedMerchant[]> {
+    return [...this.unmapped.entries()]
+      .map(([merchantKey, v]) => ({ merchantKey, sample: v.sample, hits: v.hits }))
+      .sort((a, b) => b.hits - a.hits)
+      .slice(0, limit);
+  }
 
   async createUser(config: SimConfig): Promise<string> {
     const userId = randomUUID();
@@ -64,6 +88,7 @@ export class InMemoryStore implements AccumulationStore {
     if (!user) return null;
     const prior = user.processed.get(txn.ref);
     if (prior) return { event: prior, duplicate: true };
+    if (!resolveMerchant(txn.merchant)) this.recordUnmapped(txn.merchant);
     const event = applyTransaction(user.state, txn, user.config, this.prices);
     user.processed.set(txn.ref, event);
     return { event, duplicate: false };

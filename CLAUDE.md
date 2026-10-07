@@ -246,3 +246,30 @@ The target is always **deterministic** from this tree + the user's pre-set fallb
 - **Jar (India):** round-up → digital gold. 4 cr+ users, $66M raised. Free-to-user monetization model to emulate.
 - **Deciml (India):** round-up → mutual funds. Validates round-up in India.
 - **Xaults (India):** in SEBI's fractional-share sandbox — watch for the fractional-shares unlock.
+
+---
+
+## 13. Build Status / Progress Log (UPDATE THIS AFTER EVERY PIECE)
+
+**Backend (code) — DONE & tested:**
+- [x] Scaffold — Fastify + TypeScript (strict) + integer-paise money lib + `/health`
+- [x] Supabase project (`investing-app`, ap-south-1) + schema — migrations 0001–0004
+- [x] Accumulation engine — round-up, deterministic routing, ledger, whole-share execution, progress %
+- [x] Merchant → company mapping — sellers/outlets only (Zomato→ETERNAL, McDonald's→WESTLIFE…)
+- [x] Mock price feed — `PriceProvider` interface + `MockPriceProvider`
+- [x] Simulation + demo — `npm run demo`
+- [x] REST API — `POST /users`, `GET /users/:id`, `POST /users/:id/transactions`, `GET .../portfolio` + zod + idempotency
+- [x] **Persistence** — `PgStore` on Supabase Postgres (`DATABASE_URL` in `backend/.env`). LIVE, verified end-to-end.
+- [x] **Unmapped-merchant logging** — unknown sellers recorded with hit counts (migration 0005, `GET /admin/unmapped-merchants`), verified live. Store is now dependency-injected into `buildServer` so tests use in-memory (fast/isolated).
+
+**Group A — remaining (pure software, no partnership needed) — do ONE BY ONE:**
+- [ ] Weekly batch job (scheduled accumulate + invest run)
+- [ ] Auth / login (real users + sessions; currently just a userId)
+- [ ] Consent records (DPDP) + user rule management endpoints
+- [ ] Reconciliation + audit surfacing
+
+**Then (later, after Group A):** Mobile app (React Native) · External integrations (broker API, Account Aggregator, UPI AutoPay, KYC, liquid-fund) · Business/legal/ops.
+
+**Ops pending (small, one-time):** GitHub push (`gh` installed, not logged in) · landing page live deploy.
+
+_Last build update: 2026-10-07 · 48 tests passing._

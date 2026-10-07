@@ -8,12 +8,12 @@
  */
 import pg from 'pg';
 import { toPaise } from '../../lib/money.js';
-import { resolveMerchant } from '../mapping/resolveMerchant.js';
+import { resolveMerchant, normalize } from '../mapping/resolveMerchant.js';
 import { resolveTarget } from '../accumulation/routing.js';
 import { processPurchase, progressPercent } from '../accumulation/engine.js';
 import type { RoundupRule } from '../accumulation/types.js';
 import type { PriceProvider } from '../prices/priceProvider.js';
-import type { AccumulationStore, Portfolio, ProcessResult } from './store.js';
+import type { AccumulationStore, Portfolio, ProcessResult, UnmappedMerchant } from './store.js';
 import type { SimConfig, SampleTxn } from '../simulation/runSimulation.js';
 
 function ruleFromRow(type: string, valuePaise: number): RoundupRule {
@@ -108,6 +108,20 @@ export class PgStore implements AccumulationStore {
         };
       }
       const transactionId = ins.rows[0].id as string;
+
+      // Log merchants we couldn't map, so we can grow the mapping by frequency.
+      if (!mapping) {
+        const key = normalize(txn.merchant);
+        if (key) {
+          await client.query(
+            `insert into unmapped_merchants (merchant_key, sample_name, hits, first_seen, last_seen)
+             values ($1, $2, 1, now(), now())
+             on conflict (merchant_key)
+             do update set hits = unmapped_merchants.hits + 1, sample_name = excluded.sample_name, last_seen = now()`,
+            [key, txn.merchant],
+          );
+        }
+      }
 
       // Current balance for this target (locked row if present).
       const cur = await client.query(
@@ -213,5 +227,18 @@ export class PgStore implements AccumulationStore {
         balancePaise: Number(row.balance_paise),
       })),
     };
+  }
+
+  async topUnmapped(limit: number): Promise<UnmappedMerchant[]> {
+    const res = await this.pool.query(
+      `select merchant_key, sample_name, hits from unmapped_merchants
+       order by hits desc, last_seen desc limit $1`,
+      [limit],
+    );
+    return res.rows.map((row) => ({
+      merchantKey: row.merchant_key,
+      sample: row.sample_name,
+      hits: Number(row.hits),
+    }));
   }
 }
