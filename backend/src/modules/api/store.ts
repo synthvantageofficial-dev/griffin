@@ -9,8 +9,10 @@
  * Postgres version must run it inside a single DB transaction for atomicity.
  */
 import { randomUUID } from 'node:crypto';
+import { toPaise } from '../../lib/money.js';
 import type { PriceProvider } from '../prices/priceProvider.js';
 import { resolveMerchant, normalize } from '../mapping/resolveMerchant.js';
+import { evaluateExecution } from '../accumulation/engine.js';
 import {
   applyTransaction,
   newLoopState,
@@ -24,6 +26,15 @@ export interface UnmappedMerchant {
   readonly merchantKey: string;
   readonly sample: string;
   readonly hits: number;
+}
+
+/** A whole-share buy executed by the batch sweep. */
+export interface SweepBuy {
+  readonly userId: string;
+  readonly symbol: string;
+  readonly name: string;
+  readonly qty: number;
+  readonly costPaise: number;
 }
 
 export interface ProcessResult {
@@ -45,6 +56,8 @@ export interface AccumulationStore {
   getPortfolio(userId: string): Promise<Portfolio | null>;
   /** Most-frequent merchants we couldn't map (to prioritize adding to the mapping). */
   topUnmapped(limit: number): Promise<UnmappedMerchant[]>;
+  /** Batch job: for every balance that now covers >= 1 share at the current price, buy. */
+  runSweep(): Promise<SweepBuy[]>;
 }
 
 interface MemUser {
@@ -92,6 +105,27 @@ export class InMemoryStore implements AccumulationStore {
     const event = applyTransaction(user.state, txn, user.config, this.prices);
     user.processed.set(txn.ref, event);
     return { event, duplicate: false };
+  }
+
+  async runSweep(): Promise<SweepBuy[]> {
+    const buys: SweepBuy[] = [];
+    for (const [userId, user] of this.users) {
+      for (const [symbol, balance] of user.state.balances) {
+        const price = this.prices.getPricePaise(symbol) ?? toPaise(0);
+        const dec = evaluateExecution(balance, price);
+        if (!dec.shouldBuy) continue;
+        user.state.balances.set(symbol, dec.remainingPaise);
+        user.state.holdings.set(symbol, (user.state.holdings.get(symbol) ?? 0) + dec.qty);
+        buys.push({
+          userId,
+          symbol,
+          name: user.state.names.get(symbol) ?? symbol,
+          qty: dec.qty,
+          costPaise: dec.costPaise,
+        });
+      }
+    }
+    return buys;
   }
 
   async getPortfolio(userId: string): Promise<Portfolio | null> {

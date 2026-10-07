@@ -2,7 +2,20 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildServer } from '../src/server.js';
 import { InMemoryStore } from '../src/modules/api/store.js';
-import { MockPriceProvider } from '../src/modules/prices/priceProvider.js';
+import { MockPriceProvider, type PriceProvider } from '../src/modules/prices/priceProvider.js';
+import { toPaise, type Paise } from '../src/lib/money.js';
+
+/** A price provider whose prices can change at runtime (to test the sweep). */
+class MutablePrices implements PriceProvider {
+  private readonly m = new Map<string, number>();
+  set(sym: string, paise: number): void {
+    this.m.set(sym, paise);
+  }
+  getPricePaise(sym: string): Paise | null {
+    const p = this.m.get(sym);
+    return p === undefined ? null : toPaise(p);
+  }
+}
 
 let app: FastifyInstance;
 
@@ -122,5 +135,49 @@ describe('API — unmapped merchants', () => {
     const row = rows.find((r) => r.sample === unique);
     expect(row?.hits).toBe(3);
     expect(rows.find((r) => r.sample === 'KFC')).toBeFalsy();
+  });
+});
+
+describe('API — batch sweep', () => {
+  it('buys a whole share when a balance covers one (e.g. after a price drop)', async () => {
+    const prices = new MutablePrices();
+    prices.set('ETERNAL', 30000); // ₹300 — above what we will accumulate
+    const sweepApp = await buildServer({ store: new InMemoryStore(prices) });
+    await sweepApp.ready();
+    try {
+      const userId = (
+        await sweepApp.inject({
+          method: 'POST',
+          url: '/users',
+          payload: { roundup: { type: 'fixed', valuePaise: 2500 } },
+        })
+      ).json().userId as string;
+
+      // 11 × ₹25 = ₹275 into ETERNAL (Zomato), below ₹300 -> no buy yet.
+      for (let i = 0; i < 11; i++) {
+        await sweepApp.inject({
+          method: 'POST',
+          url: `/users/${userId}/transactions`,
+          payload: { merchant: 'Zomato', amountPaise: 32000, ref: `z${i}` },
+        });
+      }
+      let port = (await sweepApp.inject({ method: 'GET', url: `/users/${userId}/portfolio` })).json();
+      expect(port.holdings.length).toBe(0);
+
+      // Price drops to ₹250 -> the ₹275 balance now covers one share. Sweep buys it.
+      prices.set('ETERNAL', 25000);
+      const sweep = (await sweepApp.inject({ method: 'POST', url: '/admin/run-sweep' })).json();
+      expect(sweep.bought).toBe(1);
+      expect(sweep.buys[0]).toEqual(expect.objectContaining({ symbol: 'ETERNAL', qty: 1 }));
+
+      port = (await sweepApp.inject({ method: 'GET', url: `/users/${userId}/portfolio` })).json();
+      expect(port.holdings).toContainEqual(expect.objectContaining({ symbol: 'ETERNAL', qty: 1 }));
+
+      // Running again buys nothing more (balance now below one share).
+      const again = (await sweepApp.inject({ method: 'POST', url: '/admin/run-sweep' })).json();
+      expect(again.bought).toBe(0);
+    } finally {
+      await sweepApp.close();
+    }
   });
 });

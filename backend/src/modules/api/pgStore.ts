@@ -10,10 +10,10 @@ import pg from 'pg';
 import { toPaise } from '../../lib/money.js';
 import { resolveMerchant, normalize } from '../mapping/resolveMerchant.js';
 import { resolveTarget } from '../accumulation/routing.js';
-import { processPurchase, progressPercent } from '../accumulation/engine.js';
+import { processPurchase, progressPercent, evaluateExecution } from '../accumulation/engine.js';
 import type { RoundupRule } from '../accumulation/types.js';
 import type { PriceProvider } from '../prices/priceProvider.js';
-import type { AccumulationStore, Portfolio, ProcessResult, UnmappedMerchant } from './store.js';
+import type { AccumulationStore, Portfolio, ProcessResult, UnmappedMerchant, SweepBuy } from './store.js';
 import type { SimConfig, SampleTxn } from '../simulation/runSimulation.js';
 
 function ruleFromRow(type: string, valuePaise: number): RoundupRule {
@@ -227,6 +227,74 @@ export class PgStore implements AccumulationStore {
         balancePaise: Number(row.balance_paise),
       })),
     };
+  }
+
+  async runSweep(): Promise<SweepBuy[]> {
+    const candidates = await this.pool.query(
+      `select user_id, target_kind, target_symbol, balance_paise, name
+       from accumulation_balances where balance_paise > 0`,
+    );
+    const buys: SweepBuy[] = [];
+
+    for (const row of candidates.rows) {
+      const price = this.prices.getPricePaise(row.target_symbol) ?? toPaise(0);
+      if (price <= 0 || Number(row.balance_paise) < price) continue;
+
+      const client = await this.pool.connect();
+      try {
+        await client.query('begin');
+        const cur = await client.query(
+          `select balance_paise from accumulation_balances
+           where user_id = $1 and target_symbol = $2 for update`,
+          [row.user_id, row.target_symbol],
+        );
+        if (!cur.rows[0]) {
+          await client.query('rollback');
+          continue;
+        }
+        const dec = evaluateExecution(toPaise(Number(cur.rows[0].balance_paise)), price);
+        if (!dec.shouldBuy) {
+          await client.query('rollback');
+          continue;
+        }
+        const key = `sweep:${row.user_id}:${row.target_symbol}:${Date.now()}`;
+        await client.query(
+          `update accumulation_balances set balance_paise = $3, updated_at = now()
+           where user_id = $1 and target_symbol = $2`,
+          [row.user_id, row.target_symbol, dec.remainingPaise],
+        );
+        await client.query(
+          `insert into orders (user_id, target_kind, symbol, qty, cost_paise, status, idempotency_key)
+           values ($1, $2, $3, $4, $5, 'filled', $6)`,
+          [row.user_id, row.target_kind, row.target_symbol, dec.qty, dec.costPaise, `${key}:order`],
+        );
+        await client.query(
+          `insert into ledger_entries (user_id, target_symbol, direction, amount_paise, idempotency_key, reason)
+           values ($1, $2, 'debit', $3, $4, 'sweep_buy')`,
+          [row.user_id, row.target_symbol, dec.costPaise, `${key}:debit`],
+        );
+        await client.query(
+          `insert into holdings (user_id, symbol, qty, name, updated_at)
+           values ($1, $2, $3, $4, now())
+           on conflict (user_id, symbol) do update set qty = holdings.qty + excluded.qty, updated_at = now()`,
+          [row.user_id, row.target_symbol, dec.qty, row.name],
+        );
+        await client.query('commit');
+        buys.push({
+          userId: row.user_id,
+          symbol: row.target_symbol,
+          name: row.name || row.target_symbol,
+          qty: dec.qty,
+          costPaise: dec.costPaise,
+        });
+      } catch (err) {
+        await client.query('rollback');
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+    return buys;
   }
 
   async topUnmapped(limit: number): Promise<UnmappedMerchant[]> {

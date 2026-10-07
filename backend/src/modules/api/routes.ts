@@ -108,6 +108,14 @@ export async function registerApiRoutes(app: FastifyInstance, store: Accumulatio
     return { unmapped: await store.topUnmapped(limit) };
   });
 
+  // Batch sweep: buy whole shares for any balance that now covers >= 1 share.
+  // Intended to run on a weekly schedule (cron); exposed here to trigger/test.
+  // TODO: protect with auth; wire to a scheduler.
+  app.post('/admin/run-sweep', async () => {
+    const buys = await store.runSweep();
+    return { bought: buys.length, buys };
+  });
+
   app.get('/users/:id/portfolio', async (req, reply) => {
     const { id } = req.params as { id: string };
     const portfolio = await store.getPortfolio(id);

@@ -262,8 +262,9 @@ The target is always **deterministic** from this tree + the user's pre-set fallb
 - [x] **Persistence** — `PgStore` on Supabase Postgres (`DATABASE_URL` in `backend/.env`). LIVE, verified end-to-end.
 - [x] **Unmapped-merchant logging** — unknown sellers recorded with hit counts (migration 0005, `GET /admin/unmapped-merchants`), verified live. Store is now dependency-injected into `buildServer` so tests use in-memory (fast/isolated).
 
+- [x] **Batch sweep job** — `store.runSweep()` re-checks every balance vs current price and buys whole shares now coverable (handles price drops / weekly-invest). `POST /admin/run-sweep`, atomic in PgStore, verified live. NOTE: still needs wiring to an actual scheduler (cron/queue) at deploy time.
+
 **Group A — remaining (pure software, no partnership needed) — do ONE BY ONE:**
-- [ ] Weekly batch job (scheduled accumulate + invest run)
 - [ ] Auth / login (real users + sessions; currently just a userId)
 - [ ] Consent records (DPDP) + user rule management endpoints
 - [ ] Reconciliation + audit surfacing
@@ -272,4 +273,4 @@ The target is always **deterministic** from this tree + the user's pre-set fallb
 
 **Ops pending (small, one-time):** GitHub push (`gh` installed, not logged in) · landing page live deploy.
 
-_Last build update: 2026-10-07 · 48 tests passing._
+_Last build update: 2026-10-07 · 49 tests passing._
