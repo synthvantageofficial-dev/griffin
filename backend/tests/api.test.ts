@@ -166,6 +166,47 @@ describe('admin routes (x-admin-key)', () => {
   });
 });
 
+describe('DPDP consents', () => {
+  it('records and updates consents (latest wins), auth required', async () => {
+    expect((await app.inject({ method: 'GET', url: '/me/consents' })).statusCode).toBe(401);
+
+    const { auth } = await signup();
+    expect((await app.inject({ method: 'GET', url: '/me/consents', headers: auth })).json().consents).toEqual([]);
+
+    await app.inject({ method: 'POST', url: '/me/consents', headers: auth, payload: { type: 'terms', granted: true } });
+    await app.inject({ method: 'POST', url: '/me/consents', headers: auth, payload: { type: 'marketing', granted: true } });
+    const withdraw = await app.inject({ method: 'POST', url: '/me/consents', headers: auth, payload: { type: 'marketing', granted: false } });
+
+    const consents = withdraw.json().consents as Array<{ type: string; granted: boolean }>;
+    expect(consents.find((c) => c.type === 'terms')?.granted).toBe(true);
+    expect(consents.find((c) => c.type === 'marketing')?.granted).toBe(false); // latest withdraw wins
+  });
+
+  it('rejects an invalid consent type', async () => {
+    const { auth } = await signup();
+    const res = await app.inject({ method: 'POST', url: '/me/consents', headers: auth, payload: { type: 'nonsense', granted: true } });
+    expect(res.statusCode).toBe(400);
+  });
+});
+
+describe('audit + reconcile', () => {
+  it('/me/activity needs a token and returns an array', async () => {
+    expect((await app.inject({ method: 'GET', url: '/me/activity' })).statusCode).toBe(401);
+    const { auth } = await signup();
+    const res = await app.inject({ method: 'GET', url: '/me/activity', headers: auth });
+    expect(res.statusCode).toBe(200);
+    expect(Array.isArray(res.json().activity)).toBe(true);
+  });
+
+  it('/admin/reconcile needs the admin key and reports ok', async () => {
+    expect((await app.inject({ method: 'GET', url: '/admin/reconcile' })).statusCode).toBe(401);
+    const res = await app.inject({ method: 'GET', url: '/admin/reconcile', headers: ADMIN });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().ok).toBe(true);
+    expect(res.json()).toHaveProperty('checked');
+  });
+});
+
 describe('batch sweep', () => {
   it('buys a whole share when a balance covers one (e.g. after a price drop)', async () => {
     const prices = new MutablePrices();

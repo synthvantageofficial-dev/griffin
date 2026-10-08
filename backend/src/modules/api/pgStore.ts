@@ -22,6 +22,10 @@ import type {
   CreateUserInput,
   CreateUserResult,
   Credentials,
+  ConsentType,
+  ConsentState,
+  LedgerEntryView,
+  ReconReport,
 } from './store.js';
 import type { SimConfig, SampleTxn } from '../simulation/runSimulation.js';
 
@@ -340,5 +344,76 @@ export class PgStore implements AccumulationStore {
       sample: row.sample_name,
       hits: Number(row.hits),
     }));
+  }
+
+  async recordConsent(
+    userId: string,
+    type: ConsentType,
+    granted: boolean,
+    version: string,
+  ): Promise<ConsentState[] | null> {
+    const exists = await this.pool.query(`select 1 from users where id = $1`, [userId]);
+    if (!exists.rows[0]) return null;
+    await this.pool.query(
+      `insert into consent_records (user_id, consent_type, action, version) values ($1, $2, $3, $4)`,
+      [userId, type, granted ? 'grant' : 'withdraw', version],
+    );
+    return this.getConsents(userId);
+  }
+
+  async getConsents(userId: string): Promise<ConsentState[] | null> {
+    const exists = await this.pool.query(`select 1 from users where id = $1`, [userId]);
+    if (!exists.rows[0]) return null;
+    const res = await this.pool.query(
+      `select distinct on (consent_type) consent_type, action, version, created_at
+       from consent_records where user_id = $1
+       order by consent_type, created_at desc`,
+      [userId],
+    );
+    return res.rows.map((row) => ({
+      type: row.consent_type,
+      granted: row.action === 'grant',
+      version: row.version,
+      updatedAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+    }));
+  }
+
+  async getActivity(userId: string, limit: number): Promise<LedgerEntryView[] | null> {
+    const exists = await this.pool.query(`select 1 from users where id = $1`, [userId]);
+    if (!exists.rows[0]) return null;
+    const res = await this.pool.query(
+      `select target_symbol, direction, amount_paise, reason, created_at
+       from ledger_entries where user_id = $1 order by created_at desc limit $2`,
+      [userId, limit],
+    );
+    return res.rows.map((row) => ({
+      symbol: row.target_symbol,
+      direction: row.direction,
+      amountPaise: Number(row.amount_paise),
+      reason: row.reason,
+      createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+    }));
+  }
+
+  async reconcile(): Promise<ReconReport> {
+    // stored balance should equal sum(credits) - sum(debits) from the ledger.
+    const res = await this.pool.query(
+      `select ab.user_id, ab.target_symbol, ab.balance_paise as stored,
+              coalesce(sum(case when le.direction = 'credit' then le.amount_paise
+                                when le.direction = 'debit'  then -le.amount_paise end), 0) as ledger
+       from accumulation_balances ab
+       left join ledger_entries le
+         on le.user_id = ab.user_id and le.target_symbol = ab.target_symbol
+       group by ab.user_id, ab.target_symbol, ab.balance_paise`,
+    );
+    const discrepancies = res.rows
+      .filter((r) => Number(r.stored) !== Number(r.ledger))
+      .map((r) => ({
+        userId: r.user_id,
+        symbol: r.target_symbol,
+        storedPaise: Number(r.stored),
+        ledgerPaise: Number(r.ledger),
+      }));
+    return { checked: res.rows.length, discrepancies };
   }
 }

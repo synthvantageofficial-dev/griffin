@@ -266,11 +266,12 @@ The target is always **deterministic** from this tree + the user's pre-set fallb
 
 - [x] **Auth / login** — email + password (scrypt hash, no plaintext) → JWT (migration 0006). Routes: `POST /auth/signup`, `POST /auth/login`, token-protected `GET /me`, `POST /me/transactions`, `GET /me/portfolio` (userId from token, no IDOR). Admin routes (`/admin/*`) protected by `x-admin-key` (env `ADMIN_API_KEY`). Prod refuses default secrets. Verified live.
 
-**Group A — remaining (pure software, no partnership needed) — do ONE BY ONE:**
-- [ ] Consent records (DPDP) + user rule management endpoints
-- [ ] Reconciliation + audit surfacing
+- [x] **DPDP consent records** — append-only `consent_records` (migration 0007); `POST`/`GET /me/consents` (terms/kyc/txn_data/marketing, versioned, latest-wins). Verified live.
+- [x] **Reconciliation + audit** — `GET /me/activity` (user's ledger money-trail) + `GET /admin/reconcile` (stored balance vs ledger sum = 0 discrepancies). Verified live.
 
-**Then (later, after Group A):** Mobile app (React Native) · External integrations (broker API, Account Aggregator, UPI AutoPay, KYC, liquid-fund) · Business/legal/ops.
+**✅ GROUP A COMPLETE — all pure-software backend pieces done, tested & deployed.**
+
+**Next (after Group A):** Mobile app (React Native) · External integrations (broker API, Account Aggregator, UPI AutoPay, KYC, liquid-fund) · Business/legal/ops. Also: wire the sweep to a scheduler; repo rename/private.
 
 **Deployment — LIVE (staging) 🚀 (2026-10-07)**
 - **Code:** GitHub `synthvantageofficial-dev/griffin` (main). **PUBLIC** — no secrets in repo (`.env` gitignored; only the Supabase anon key is in the landing page, which is public by design). TODO: consider renaming (repo is named "griffin", the US company) + making private.
@@ -278,4 +279,4 @@ The target is always **deterministic** from this tree + the user's pre-set fallb
 - **Landing:** Render static site `owna-landing` → **https://owna-landing.onrender.com** (publishPath `landing`, auto-deploys on push).
 - **DB:** Supabase Postgres (Mumbai). Full stack verified end-to-end live (signup → txn → portfolio).
 
-_Last build update: 2026-10-07 · 52 tests passing · deployed live._
+_Last build update: 2026-10-07 · 56 tests passing · Group A complete · deployed live._

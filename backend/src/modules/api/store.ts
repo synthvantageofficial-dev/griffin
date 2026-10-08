@@ -37,6 +37,36 @@ export interface SweepBuy {
   readonly costPaise: number;
 }
 
+/** DPDP consent purposes (separate, explicit). */
+export type ConsentType = 'terms' | 'kyc' | 'txn_data' | 'marketing';
+export interface ConsentState {
+  readonly type: string;
+  readonly granted: boolean;
+  readonly version: string;
+  readonly updatedAt: string;
+}
+
+/** A line of the user's money trail (audit surfacing — Golden Rule #7). */
+export interface LedgerEntryView {
+  readonly symbol: string;
+  readonly direction: string;
+  readonly amountPaise: number;
+  readonly reason: string;
+  readonly createdAt: string;
+}
+
+/** Reconciliation: stored balance vs the ledger-derived balance. */
+export interface ReconDiscrepancy {
+  readonly userId: string;
+  readonly symbol: string;
+  readonly storedPaise: number;
+  readonly ledgerPaise: number;
+}
+export interface ReconReport {
+  readonly checked: number;
+  readonly discrepancies: ReconDiscrepancy[];
+}
+
 export interface ProcessResult {
   readonly event: SimEvent;
   readonly duplicate: boolean;
@@ -70,6 +100,13 @@ export interface AccumulationStore {
   topUnmapped(limit: number): Promise<UnmappedMerchant[]>;
   /** Batch job: for every balance that now covers >= 1 share at the current price, buy. */
   runSweep(): Promise<SweepBuy[]>;
+  /** Record a DPDP consent grant/withdraw; returns current consent state (null if no user). */
+  recordConsent(userId: string, type: ConsentType, granted: boolean, version: string): Promise<ConsentState[] | null>;
+  getConsents(userId: string): Promise<ConsentState[] | null>;
+  /** The user's money trail (ledger entries), newest first. Null if no user. */
+  getActivity(userId: string, limit: number): Promise<LedgerEntryView[] | null>;
+  /** Ops integrity check: does each stored balance match its ledger sum? */
+  reconcile(): Promise<ReconReport>;
 }
 
 interface MemUser {
@@ -78,6 +115,7 @@ interface MemUser {
   readonly config: SimConfig;
   readonly state: LoopState;
   readonly processed: Map<string, SimEvent>;
+  readonly consents: Map<string, ConsentState>;
 }
 
 function normalizeEmail(email: string): string {
@@ -115,6 +153,7 @@ export class InMemoryStore implements AccumulationStore {
       config: input.config,
       state: newLoopState(),
       processed: new Map(),
+      consents: new Map(),
     });
     this.emailIndex.set(email, userId);
     return { userId };
@@ -141,6 +180,34 @@ export class InMemoryStore implements AccumulationStore {
     const event = applyTransaction(user.state, txn, user.config, this.prices);
     user.processed.set(txn.ref, event);
     return { event, duplicate: false };
+  }
+
+  async recordConsent(
+    userId: string,
+    type: ConsentType,
+    granted: boolean,
+    version: string,
+  ): Promise<ConsentState[] | null> {
+    const user = this.users.get(userId);
+    if (!user) return null;
+    user.consents.set(type, { type, granted, version, updatedAt: new Date().toISOString() });
+    return [...user.consents.values()];
+  }
+
+  async getConsents(userId: string): Promise<ConsentState[] | null> {
+    const user = this.users.get(userId);
+    if (!user) return null;
+    return [...user.consents.values()];
+  }
+
+  // The in-memory store keeps no separate ledger (that lives only in Postgres),
+  // so audit/reconcile are trivially empty here; the real checks run on PgStore.
+  async getActivity(userId: string): Promise<LedgerEntryView[] | null> {
+    return this.users.has(userId) ? [] : null;
+  }
+
+  async reconcile(): Promise<ReconReport> {
+    return { checked: 0, discrepancies: [] };
   }
 
   async runSweep(): Promise<SweepBuy[]> {

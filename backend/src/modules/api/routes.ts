@@ -39,6 +39,12 @@ const txnSchema = z.object({
   ref: z.string().min(1).max(80),
 });
 
+const consentSchema = z.object({
+  type: z.enum(['terms', 'kyc', 'txn_data', 'marketing']),
+  granted: z.boolean(),
+  version: z.string().min(1).max(20).default('v1'),
+});
+
 function buildConfig(body: { roundup?: z.infer<typeof roundupSchema>; fallbackSymbol?: string | undefined }): SimConfig {
   const r = body.roundup;
   const rule =
@@ -158,7 +164,45 @@ export async function registerApiRoutes(app: FastifyInstance, store: Accumulatio
     };
   });
 
+  // ---- DPDP consents (the user's own) ----
+  app.get('/me/consents', async (req, reply) => {
+    const userId = requireUser(req, reply);
+    if (!userId) return;
+    const consents = await store.getConsents(userId);
+    if (!consents) return reply.code(404).send({ error: 'user not found' });
+    return { consents };
+  });
+
+  app.post('/me/consents', async (req, reply) => {
+    const userId = requireUser(req, reply);
+    if (!userId) return;
+    const parsed = consentSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid body', details: parsed.error.flatten() });
+    const consents = await store.recordConsent(userId, parsed.data.type, parsed.data.granted, parsed.data.version);
+    if (!consents) return reply.code(404).send({ error: 'user not found' });
+    return { consents };
+  });
+
+  // ---- Audit: the user's own money trail ----
+  app.get('/me/activity', async (req, reply) => {
+    const userId = requireUser(req, reply);
+    if (!userId) return;
+    const q = req.query as { limit?: string };
+    const limit = Math.min(Math.max(Number(q.limit) || 100, 1), 500);
+    const activity = await store.getActivity(userId, limit);
+    if (!activity) return reply.code(404).send({ error: 'user not found' });
+    return {
+      activity: activity.map((a) => ({ ...a, display: formatINR(toPaise(a.amountPaise)) })),
+    };
+  });
+
   // ---- Admin (x-admin-key) ----
+  app.get('/admin/reconcile', async (req, reply) => {
+    if (!isAdmin(req)) return reply.code(401).send({ error: 'unauthorized' });
+    const report = await store.reconcile();
+    return { ok: report.discrepancies.length === 0, ...report };
+  });
+
   app.get('/admin/unmapped-merchants', async (req, reply) => {
     if (!isAdmin(req)) return reply.code(401).send({ error: 'unauthorized' });
     const q = req.query as { limit?: string };
