@@ -26,6 +26,13 @@ export async function buildServer(opts?: { store?: AccumulationStore }): Promise
 
   await app.register(helmet);
 
+  // Friendly root so the base URL isn't a 404.
+  app.get('/', async () => ({
+    service: 'Owna API',
+    status: 'ok',
+    docs: 'Owna — invest where you shop (India). Auth-protected API; see /health.',
+  }));
+
   // Liveness probe. Real business routes are added per module as we build.
   app.get('/health', async () => ({ status: 'ok', service: 'investing-app-backend', ts: new Date().toISOString() }));
 
